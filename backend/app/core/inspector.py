@@ -92,3 +92,20 @@ def lookup_ground_truth(package_name: str, symbol_name: str, python_bin: Path) -
     example = _EXAMPLE.search(details["doc"] or "")
     details["example"] = example[1].strip("\r\n") if example else None
     return details
+
+_MISSING_PKG_PATTERNS = (
+    re.compile(r"No module named ['\"]([^'\".]+)", re.IGNORECASE),
+    re.compile(r"moved to the [`'\"]([a-zA-Z0-9_\-]+)[`'\"] package", re.IGNORECASE),
+    re.compile(r"install [`'\"]([a-zA-Z0-9_\-]+)[`'\"]", re.IGNORECASE),
+)
+
+
+def extract_missing_dependencies(error_trace: str) -> list[str]:
+    """Extract required package names from import failures and migration messages."""
+    found = []
+    for pattern in _MISSING_PKG_PATTERNS:
+        for match in pattern.finditer(error_trace):
+            pkg = match.group(1).replace("_", "-").strip()
+            if pkg and pkg not in found:
+                found.append(pkg)
+    return found

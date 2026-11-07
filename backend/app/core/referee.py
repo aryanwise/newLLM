@@ -14,7 +14,7 @@ class VerificationResult:
     error: str | None = None
 
 
-def run_script(python_bin: Path, target_file: Path, *, timeout: float = 15) -> VerificationResult:
+def verify(python_bin: Path, target_file: Path, *, timeout: float = 15) -> VerificationResult:
     """Run the script in its directory and require a clean exit with stdout."""
     script = target_file.absolute()
     command = [
@@ -54,3 +54,6 @@ def run_script(python_bin: Path, target_file: Path, *, timeout: float = 15) -> V
             "Must instantiate and execute user requirements.",
         )
     return VerificationResult(True, stdout, stderr, result.returncode)
+
+
+run_script = verify

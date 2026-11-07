@@ -57,6 +57,7 @@ class LLMClient:
             raise ValueError("base_url must be an HTTP or HTTPS API URL")
         if url.query or url.fragment or url.username is not None:
             raise ValueError("base_url must omit credentials, query and fragment")
+        self._base_url = base_url.rstrip("/")
         self._connection = HTTPSConnection if url.scheme == "https" else HTTPConnection
         self._host = url.hostname
         self._port = url.port
@@ -103,14 +104,20 @@ class LLMClient:
             payload["response_format"] = response_format
         body = json.dumps(payload).encode("utf-8")
 
-        with closing(self._connection(self._host, self._port, timeout=self._timeout)) as connection:
-            connection.request("POST", self._path, body=body, headers=self._headers)
-            response = connection.getresponse()
-            if not 200 <= response.status < 300:
-                raise RuntimeError(
-                    f"Chat completions request failed (HTTP {response.status} {response.reason})"
-                )
-            data = response.read()
+        try:
+            with closing(self._connection(self._host, self._port, timeout=self._timeout)) as connection:
+                connection.request("POST", self._path, body=body, headers=self._headers)
+                response = connection.getresponse()
+                if not 200 <= response.status < 300:
+                    raise RuntimeError(
+                        f"Chat completions request failed (HTTP {response.status} {response.reason})"
+                    )
+                data = response.read()
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not reach the model provider at {self._base_url}. "
+                "Check that Ollama or LM Studio is running and that the endpoint is correct."
+            ) from exc
 
         try:
             content = json.loads(data)["choices"][0]["message"]["content"]

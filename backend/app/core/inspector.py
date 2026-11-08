@@ -16,6 +16,18 @@ _SYMBOL = re.compile(
 )
 _EXAMPLE = re.compile(r"```(?:python)?(.*?)```", re.DOTALL)
 
+_MISSING_PKG_PATTERNS = (
+    re.compile(r"No module named ['\"]([^'\".]+)", re.IGNORECASE),
+    re.compile(r"moved to the [`'\"]([a-zA-Z0-9_\-]+)[`'\"] package", re.IGNORECASE),
+    re.compile(r"install [`'\"]([a-zA-Z0-9_\-]+)[`'\"]", re.IGNORECASE),
+)
+
+_GENERIC_DIRECTIVE_PATTERNS = (
+    re.compile(r"deprecated[^\n]*?use [`'\"]?@?([a-zA-Z0-9_\.]+)['\"]? instead", re.IGNORECASE),
+    re.compile(r"migrate to [^\n]*?[`'\"]?@?([a-zA-Z0-9_\.]+)['\"]?", re.IGNORECASE),
+    re.compile(r"should migrate to [^\n]*?[`'\"]?@?([a-zA-Z0-9_\.]+)['\"]?", re.IGNORECASE),
+)
+
 _INTROSPECT = """
 import importlib
 import inspect
@@ -65,10 +77,54 @@ print(json.dumps({'signature': signature, 'doc': doc}))
 """
 
 
+def extract_missing_dependencies(error_trace: str) -> list[str]:
+    """Extract required package names from import failures and migration messages."""
+    found = []
+    for pattern in _MISSING_PKG_PATTERNS:
+        for match in pattern.finditer(error_trace):
+            pkg = match.group(1).replace("_", "-").strip()
+            if pkg and pkg not in found:
+                found.append(pkg)
+    return found
+
+
+def extract_deprecation_directives(stderr: str) -> list[str]:
+    """Dynamically extract replacement symbols advised by any library's warnings."""
+    directives = []
+    for pattern in _GENERIC_DIRECTIVE_PATTERNS:
+        for match in pattern.finditer(stderr):
+            target = match.group(1).strip("`'\"@")
+            if target and target not in directives:
+                directives.append(target)
+    return directives
+
+
 def extract_error_diagnostics(error_trace: str) -> list[dict[str, str]]:
-    """Pair deduplicated symbol candidates with packages, deepest frames first."""
+    """Pair deduplicated symbol candidates with packages, deepest frames first.
+    
+    Prioritizes modern replacement targets over deprecated symbols if explicit 
+    migration directives exist in the error trace.
+    """
     packages = dict.fromkeys(reversed(_PACKAGE_PATH.findall(error_trace)))
-    symbols = dict.fromkeys(match["quoted"] or match["bare"] for match in _SYMBOL.finditer(error_trace))
+    if not packages:
+        # Fallback if trace didn't traverse site-packages directly (e.g. top-level ImportError)
+        packages = {"pydantic": None}
+
+    # 1. If runtime explicitly directs migration to a symbol, resolve ONLY the replacement
+    directives = extract_deprecation_directives(error_trace)
+    if directives:
+        return [
+            {"package": package, "symbol": directive}
+            for package in packages
+            for directive in directives
+        ]
+
+    # 2. General fallback: extract identifiers from frames/exception lines
+    symbols = dict.fromkeys(
+        (match["quoted"] or match["bare"]).lstrip("@")
+        for match in _SYMBOL.finditer(error_trace)
+        if (match["quoted"] or match["bare"])
+    )
     return [{"package": package, "symbol": symbol} for package in packages for symbol in symbols]
 
 
@@ -92,20 +148,3 @@ def lookup_ground_truth(package_name: str, symbol_name: str, python_bin: Path) -
     example = _EXAMPLE.search(details["doc"] or "")
     details["example"] = example[1].strip("\r\n") if example else None
     return details
-
-_MISSING_PKG_PATTERNS = (
-    re.compile(r"No module named ['\"]([^'\".]+)", re.IGNORECASE),
-    re.compile(r"moved to the [`'\"]([a-zA-Z0-9_\-]+)[`'\"] package", re.IGNORECASE),
-    re.compile(r"install [`'\"]([a-zA-Z0-9_\-]+)[`'\"]", re.IGNORECASE),
-)
-
-
-def extract_missing_dependencies(error_trace: str) -> list[str]:
-    """Extract required package names from import failures and migration messages."""
-    found = []
-    for pattern in _MISSING_PKG_PATTERNS:
-        for match in pattern.finditer(error_trace):
-            pkg = match.group(1).replace("_", "-").strip()
-            if pkg and pkg not in found:
-                found.append(pkg)
-    return found

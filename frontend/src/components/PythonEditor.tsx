@@ -6,6 +6,10 @@ import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker.js?worker'
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() }
 loader.config({ monaco })
 
+const background = { 'editor.background': '#00000000', 'editorGutter.background': '#00000000' }
+monaco.editor.defineTheme('workbench-light', { base: 'vs', inherit: true, rules: [], colors: background })
+monaco.editor.defineTheme('workbench-dark', { base: 'vs-dark', inherit: true, rules: [], colors: background })
+
 const options: monaco.editor.IStandaloneEditorConstructionOptions = {
   ariaLabel: 'Python source code',
   readOnly: true,
@@ -21,6 +25,6 @@ const options: monaco.editor.IStandaloneEditorConstructionOptions = {
   overviewRulerLanes: 0,
 }
 
-export default function PythonEditor({ content }: { content: string }) {
-  return <Editor language="python" theme="vs-dark" value={content} options={options} height="100%" />
+export default function PythonEditor({ content, theme }: { content: string; theme: 'light' | 'dark' }) {
+  return <Editor language="python" theme={`workbench-${theme}`} value={content} options={options} height="100%" />
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 
 import { engineSocketUrl } from "../api";
+import { availableTarget, conflictingTarget, executionPrompt, targetPrefix } from "../executionTarget";
 import {
   ENGINE_STAGES,
   type CodeState,
@@ -56,11 +57,13 @@ const codeStates: Partial<Record<EngineStage, CodeState>> = {
   SUCCESS: "Verified Passing",
 };
 
+const maxTargetRetries = 2;
+
 type Action =
   | { type: "start" }
   | { type: "connected" }
   | { type: "clear" }
-  | { type: "event"; event: WebSocketEvent };
+  | { type: "event"; event: WebSocketEvent; reconnecting?: boolean };
 
 function isTerminal(stage: EngineStage): boolean {
   return stage === "SUCCESS" || stage === "FAILURE";
@@ -89,7 +92,7 @@ function update(state: EngineState, action: Action): EngineState {
         isExecuting: !terminal,
         currentStage: event.stage,
         error: event.stage === "FAILURE" ? event.message : null,
-        connectionStatus: terminal ? "DISCONNECTED" : state.connectionStatus,
+        connectionStatus: terminal ? "DISCONNECTED" : action.reconnecting ? "CONNECTING" : state.connectionStatus,
       };
     }
   }
@@ -128,50 +131,96 @@ export function useEngineSocket() {
     socket?.close();
   }, []);
 
-  const execute = useCallback((request: ExecuteRequest) => {
-    if (active.current) return;
+  const execute = useCallback((request: ExecuteRequest, existingFilenames: readonly string[] = []): boolean => {
+    if (active.current) return false;
     dispatch({ type: "start" });
 
-    let socket: WebSocket;
-    try {
-      socket = new WebSocket(engineSocketUrl());
-    } catch {
-      dispatch(failure("Could not open the engine connection. Check the backend URL."));
-      return;
-    }
-    active.current = socket;
+    const suffix = crypto.getRandomValues(new Uint32Array(1))[0].toString(16).padStart(8, "0");
+    const prefix = targetPrefix(request.prompt, suffix);
+    const unavailable = new Set(existingFilenames.map((filename) => filename.toLowerCase()));
+    const conflicts: string[] = [];
 
-    function fail(message: string) {
-      if (active.current !== socket) return;
-      active.current = null;
-      dispatch(failure(message));
-      socket.close();
+    function reserveTarget() {
+      const filename = availableTarget(prefix, unavailable);
+      unavailable.add(filename.toLowerCase());
+      return filename;
     }
 
-    socket.onopen = () => {
-      if (active.current !== socket) return;
-      dispatch({ type: "connected" });
+    function openAttempt(filename: string) {
+      let socket: WebSocket;
       try {
-        socket.send(JSON.stringify(request));
+        socket = new WebSocket(engineSocketUrl());
       } catch {
-        fail("Could not send the execution request. Check that the backend is running.");
-      }
-    };
-    socket.onmessage = ({ data }) => {
-      if (active.current !== socket) return;
-      const event = parseEvent(data);
-      if (!event) {
-        fail("The engine sent an invalid execution event.");
+        dispatch(failure("Could not open the engine connection. Check the backend URL."));
         return;
       }
-      dispatch({ type: "event", event });
-      if (isTerminal(event.stage)) {
+      active.current = socket;
+      let retryTarget: string | undefined;
+
+      function fail(message: string) {
+        if (active.current !== socket) return;
         active.current = null;
-        socket.close(1000);
+        dispatch(failure(message));
+        socket.close();
       }
-    };
-    socket.onerror = () => fail("Engine connection failed. Check that the backend is running.");
-    socket.onclose = () => fail("The engine disconnected before reporting the result.");
+
+      socket.onopen = () => {
+        if (active.current !== socket) return;
+        dispatch({ type: "connected" });
+        try {
+          const prompt = executionPrompt(request.prompt, filename, [...new Set(conflicts)]);
+          socket.send(JSON.stringify({ ...request, prompt }));
+        } catch {
+          fail("Could not send the execution request. Check that the backend is running.");
+        }
+      };
+      socket.onmessage = ({ data }) => {
+        if (active.current !== socket || retryTarget) return;
+        const event = parseEvent(data);
+        if (!event) {
+          fail("The engine sent an invalid execution event.");
+          return;
+        }
+
+        const conflict = conflictingTarget(event);
+        if (conflict && conflicts.length < maxTargetRetries) {
+          conflicts.push(conflict);
+          unavailable.add(conflict.toLowerCase());
+          retryTarget = reserveTarget();
+          dispatch({
+            type: "event",
+            reconnecting: true,
+            event: {
+              stage: "PLANNING",
+              message: `${conflict} already exists. Retrying with ${retryTarget}.`,
+              timestamp: event.timestamp,
+            },
+          });
+          return;
+        }
+
+        dispatch({ type: "event", event });
+        if (isTerminal(event.stage)) {
+          active.current = null;
+          socket.close(1000);
+        }
+      };
+      socket.onerror = () => {
+        if (!retryTarget) fail("Engine connection failed. Check that the backend is running.");
+      };
+      socket.onclose = () => {
+        if (active.current !== socket) return;
+        if (retryTarget) {
+          active.current = null;
+          openAttempt(retryTarget);
+        } else {
+          fail("The engine disconnected before reporting the result.");
+        }
+      };
+    }
+
+    openAttempt(reserveTarget());
+    return true;
   }, []);
 
   const clearLogs = useCallback(() => dispatch({ type: "clear" }), []);

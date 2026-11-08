@@ -14,13 +14,14 @@ from tempfile import NamedTemporaryFile
 from . import inspector, referee, surgeon
 from .env import SandboxEnvironment
 from .llm import LLMClient
+import textwrap
 
 
 StreamCallback = Callable[[dict], Awaitable[None] | None]
 _FRAME = re.compile(r'^\s*File "(.+)", line (\d+)(?:, [^\r\n]*)?\r?$', re.MULTILINE)
 _CODE_ONLY = "Return only Python source code, without explanation."
 _RUN_ERRORS = (OSError, ValueError, RuntimeError, HTTPException)
-MAX_REPAIRS = 3
+MAX_REPAIRS = 7
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,19 @@ class Conductor:
         verification = referee.VerificationResult(False)
         attempts = 0
         error = None
+        failed_attempts: list[dict[str, str]] = []
+
+        def _format_failed_attempts(history: list[dict[str, str]]) -> str:
+            if not history:
+                return "None."
+            entries = []
+            for i, entry in enumerate(history, 1):
+                entries.append(
+                    f"--- Attempt {i} ---\n"
+                    f"Attempted Code:\n{entry['code']}\n"
+                    f"Runtime Error:\n{entry['error']}"
+                )
+            return "\n\n".join(entries)
 
         async def check(stage: str, message: str) -> referee.VerificationResult:
             nonlocal attempts
@@ -107,11 +121,9 @@ class Conductor:
                     )
                     installed, out = await asyncio.to_thread(environment.install_dependencies, missing_pkgs)
                     if installed:
-                        # Re-verify immediately: if code was already using the right package, it might pass now
                         verification = await check("VERIFYING", "Re-executing after installing missing dependency.")
                         if verification.success:
                             break
-                        # Update traceback if error evolved
                         traceback = _failure_text(verification)
 
                 await emit("INTROSPECTING", f"Inspecting installed APIs named in failure (attempt {repair_turn}).",
@@ -137,40 +149,72 @@ class Conductor:
                         replacement = await llm.complete(
                             f"Request:\n{prompt}\n\nFailure:\n{traceback}\n\n"
                             f"Installed API documentation:\n{api_context}\n\n"
+                            f"Previously attempted implementations that FAILED runtime verification:\n"
+                            f"{_format_failed_attempts(failed_attempts)}\n\n"
                             f"Existing module imports for context only:\n{surgeon.module_imports(source)}\n\n"
                             f"Rewrite only this {node['node_type']} at line {line_number}:\n"
                             f"{node['source_slice']}\n\n"
-                            "Return the replacement node alone. Match the slice's indentation: "
-                            "start the first line at column zero and keep the file's indentation on subsequent lines. "
-                            "Reuse bindings already available in the file. All bytes outside this node will be retained.",
+                            "Return the replacement node alone. Use standard 4-space indentation relative to the block level. "
+                            "Reuse bindings already available in the file. All bytes outside this node will be retained. "
+                            "Do not repeat any syntax, arguments, or signatures that failed above.",
                             system=_CODE_ONLY,
                         )
+
+                        target_col = node["start_point"][1]
+                        formatted_replacement = _reindent_to_column(replacement, target_col)
                         patched = surgeon.splice_replacement(
-                            source, node["start_byte"], node["end_byte"], replacement.strip("\r\n").lstrip(" \t"),
+                            source, node["start_byte"], node["end_byte"], formatted_replacement
                         )
+
+                        # Dynamically harmonize imports for the failing package
+                        target_pkg = symbols[0]["package"] if symbols else "pydantic"
+                        if hasattr(surgeon, "harmonize_imports"):
+                            patched = surgeon.harmonize_imports(patched, replacement, target_pkg)
+                        elif hasattr(surgeon, "reconcile_imports"):
+                            for symbol in ("field_validator", "model_validator", "field_serializer", "model_serializer", "BaseModel"):
+                                if symbol in replacement:
+                                    patched = surgeon.reconcile_imports(patched, target_pkg, symbol)
+
                         _write_revision(target_file, source, patched)
                         source = patched
                         spliced_successfully = True
                         await emit("SPLICING", f"Replaced {node['node_type']} at line {line_number} (attempt {repair_turn}).",
                                    payload={**node, "line_number": line_number}, file_content=source)
                         verification = await check("VERIFYING_TURN_2", f"Executing surgically repaired script (attempt {repair_turn}).")
+                        if not verification.success:
+                            failed_attempts.append({
+                                "code": replacement.strip(),
+                                "error": _failure_text(verification).strip().splitlines()[-1],
+                            })
                     except _RUN_ERRORS as exc:
                         repair_error = str(exc)
 
-                # If surgical splicing did not yield a passing script (e.g. missing import NameError),
-                # allow a full-file repair turn so top-level imports can be updated
-                if not verification.success:
-                    await emit("GENERATING_FALLBACK", f"Generating full-file repair (attempt {repair_turn}).",
-                               payload={"repair_error": repair_error} if repair_error else None)
+                # Only fall back to a full-file rewrite if surgical splicing could NOT isolate a node
+                if not verification.success and not spliced_successfully:
+                    await emit(
+                        "GENERATING_FALLBACK",
+                        f"Generating full-file repair (attempt {repair_turn}).",
+                        payload={"repair_error": repair_error} if repair_error else None,
+                    )
                     repaired = await llm.complete(
                         f"Rewrite the complete standalone script to satisfy this request:\n{prompt}\n\n"
-                        f"Current script:\n{source}\n\nLatest failure:\n{_failure_text(verification)}\n\n"
-                        f"Installed API documentation:\n{api_context}",
+                        f"Current script:\n{source}\n\n"
+                        f"Latest failure:\n{_failure_text(verification)}\n\n"
+                        f"Installed API documentation:\n{api_context}\n\n"
+                        f"Previously attempted implementations that FAILED runtime verification:\n"
+                        f"{_format_failed_attempts(failed_attempts)}\n\n"
+                        "Constraint: Strictly follow the signatures in the installed API documentation above. "
+                        "Do not repeat any previously attempted code from the failed attempts ledger.",
                         system=_CODE_ONLY,
                     )
                     _write_revision(target_file, source, repaired)
                     source = repaired
                     verification = await check("VERIFYING_FALLBACK", f"Executing full-file repair (attempt {repair_turn}).")
+                    if not verification.success:
+                        failed_attempts.append({
+                            "code": f"Full file revision (turn {repair_turn})",
+                            "error": _failure_text(verification).strip().splitlines()[-1],
+                        })
 
             if not verification.success:
                 error = verification.error or f"Script exited with status {verification.returncode}."
@@ -213,6 +257,27 @@ def _failure_text(result: referee.VerificationResult) -> str:
 
 
 def _target_line(traceback: str, target_file: Path) -> int | None:
+    """Extract the primary failing line inside target_file.
+    
+    If an exception chain occurs ('The above exception was the direct cause of...'),
+    the root cause that triggered the failure appears in the first traceback block.
+    """
+    # If the traceback contains chained causes, isolate the initial/root cause block
+    if "The above exception was the direct cause of" in traceback:
+        blocks = traceback.split("The above exception was the direct cause of")
+        trace_to_search = blocks[0]
+    elif "During handling of the above exception" in traceback:
+        blocks = traceback.split("During handling of the above exception")
+        trace_to_search = blocks[0]
+    else:
+        trace_to_search = traceback
+
+    # Find the deepest frame within target_file for that error block
+    for filename, line in reversed(_FRAME.findall(trace_to_search)):
+        if (target_file.parent / filename).resolve() == target_file:
+            return int(line)
+
+    # Fallback to general search if the root cause occurred entirely outside target_file
     for filename, line in reversed(_FRAME.findall(traceback)):
         if (target_file.parent / filename).resolve() == target_file:
             return int(line)
@@ -251,3 +316,20 @@ def _write_revision(target: Path, previous: str, revision: str) -> None:
         staged.replace(target)
     finally:
         staged.unlink(missing_ok=True)
+
+def _reindent_to_column(code: str, target_col: int) -> str:
+    """Reindent code cleanly to match AST target column indentation."""
+    # 1. Dedent completely to column 0
+    dedented = textwrap.dedent(code.strip("\r\n"))
+    lines = dedented.splitlines()
+    if not lines:
+        return code
+
+    # 2. Line 0 starts at start_byte (column indentation already exists in the file)
+    # Continuation lines are indented by target_col
+    prefix = " " * target_col
+    adjusted = [lines[0]]
+    for line in lines[1:]:
+        adjusted.append(prefix + line if line.strip() else "")
+
+    return "\n".join(adjusted)

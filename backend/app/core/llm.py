@@ -33,10 +33,9 @@ _PLAN_FORMAT = {
     "type": "json_schema",
     "json_schema": {"name": "project_plan", "strict": True, "schema": _PLAN_SCHEMA},
 }
-_FENCED_CODE = re.compile(
-    r"\s*(?P<fence>`{3,}|~{3,})[\w.+\- \t]*\r?\n"
-    r"(?P<code>.*?)^[ \t]*(?P=fence)[ \t]*\s*",
-    re.DOTALL | re.MULTILINE,
+_CODE_BLOCK_PATTERN = re.compile(
+    r"```(?:python)?\s*\r?\n(?P<code>.*?)\r?\n```",
+    re.DOTALL | re.IGNORECASE,
 )
 
 
@@ -70,10 +69,23 @@ class LLMClient:
             self._headers["Authorization"] = f"Bearer {api_key}"
 
     async def complete(self, prompt: str, system: str = "") -> str:
-        """Return assistant text with any enclosing Markdown fence removed."""
+        """Return assistant code with any Markdown fences and surrounding commentary stripped."""
         content = await asyncio.to_thread(self._chat, prompt, system)
-        fence = _FENCED_CODE.fullmatch(content)
-        return fence["code"].removesuffix("\n").removesuffix("\r") if fence else content
+
+        # 1. Search for an enclosed code fence anywhere in the output
+        match = _CODE_BLOCK_PATTERN.search(content)
+        if match:
+            return match.group("code").strip("\r\n")
+
+        # 2. Handle an unclosed opening fence
+        if content.strip().startswith("```"):
+            lines = content.strip().splitlines()
+            start_idx = 1
+            end_idx = len(lines) - 1 if lines[-1].strip().startswith("```") else len(lines)
+            return "\n".join(lines[start_idx:end_idx]).strip("\r\n")
+
+        # 3. Plain Python code with no fences
+        return content.strip("\r\n")
 
     async def structured_plan(self, prompt: str) -> ProjectPlan:
         """Return a project plan after validating the model's JSON response."""

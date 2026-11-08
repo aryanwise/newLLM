@@ -16,6 +16,15 @@ export type EngineStage = (typeof ENGINE_STAGES)[number];
 export type ConnectionStatus = "CONNECTED" | "CONNECTING" | "DISCONNECTED";
 export type RunStatus = "IDLE" | "PLANNING" | "PROVISIONING" | "GENERATING" | "HEALING" | "SUCCESS" | "FAILURE";
 export type CodeState = "Turn 1 Draft" | "Surgically Repaired (AST Spliced)" | "Verified Passing" | "Full-file Repair";
+export type ThemePreference = "system" | "light" | "dark";
+
+export interface PromptMessage {
+  id: string;
+  prompt: string;
+  status: "running" | "success" | "failure";
+  filename?: string;
+  error?: string;
+}
 
 export interface ExecuteRequest {
   prompt: string;

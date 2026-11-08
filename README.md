@@ -21,9 +21,9 @@ npm ci
 npm run dev
 ```
 
-Open [the local IDE](http://localhost:5173). Under **Workspace directory**, click **Browse** to choose a folder or type its path. Select a model and run a prompt. To rerun in the same workspace, ask for a new `.py` filename so the existing output file stays intact.
+Open [the local IDE](http://localhost:5173). Use **Browse** to choose a workspace folder or type its path. Select a model in **Settings** and send a prompt. The app requests a fresh Python filename for each run so you can keep working in the same folder.
 
-To use another provider, open **Provider** in the IDE and save its OpenAI-compatible API URL. For LM Studio, a typical URL is `http://localhost:1234/v1`. The settings apply for the life of the backend process. To set startup defaults, export `ENGINE_BASE_URL`, `ENGINE_MODEL_NAME`, or `ENGINE_WORKSPACE_PATH` before starting the backend.
+To use another provider, open **Settings** and save its OpenAI-compatible API URL. For LM Studio, a typical URL is `http://localhost:1234/v1`. Provider settings apply for the life of the backend process. To set startup defaults, export `ENGINE_BASE_URL`, `ENGINE_MODEL_NAME`, or `ENGINE_WORKSPACE_PATH` before starting the backend.
 
 The backend installs planned dependencies and executes generated code as your local user. It listens on loopback by default.
 

@@ -1,6 +1,7 @@
-import type { FormEvent, KeyboardEvent } from 'react'
-import { ArrowUpRight, Braces, Command, FileCode2, LoaderCircle, Package, Play } from 'lucide-react'
-import type { PlanMetadata } from '../types/engine'
+import { useEffect, useRef, type FormEvent, type KeyboardEvent } from 'react'
+import { ArrowUp, ArrowUpRight, Check, CircleAlert, CodeXml, FileCode2, LoaderCircle } from 'lucide-react'
+import type { PlanMetadata, PromptMessage } from '../types/engine'
+import './conversation-ui.css'
 
 interface PromptPanelProps {
   prompt: string
@@ -9,9 +10,80 @@ interface PromptPanelProps {
   canRun: boolean
   isExecuting: boolean
   plan: PlanMetadata | null
+  messages: PromptMessage[]
+  disabledReason?: string
+  onOpenFile?: (filename: string) => void
 }
 
-export function PromptPanel({ prompt, onPromptChange, onRun, canRun, isExecuting, plan }: PromptPanelProps) {
+const statusLabels = {
+  running: 'Working on it',
+  success: 'Verified and ready',
+  failure: 'Run failed',
+}
+
+const statusIcons = { running: LoaderCircle, success: Check, failure: CircleAlert }
+
+function PromptFile({ filename, onOpenFile }: { filename: string; onOpenFile?: (filename: string) => void }) {
+  const label = <><FileCode2 size={14} aria-hidden="true" /><code>{filename}</code></>
+  return onOpenFile ? (
+    <button type="button" className="conversation-file" onClick={() => onOpenFile(filename)} aria-label={`Open ${filename}`}>
+      {label}<ArrowUpRight size={13} aria-hidden="true" />
+    </button>
+  ) : <span className="conversation-file">{label}</span>
+}
+
+function PromptTurn({ message, plan, onOpenFile }: {
+  message: PromptMessage
+  plan: PlanMetadata | null
+  onOpenFile?: (filename: string) => void
+}) {
+  const StatusIcon = statusIcons[message.status]
+  const openVerifiedFile = message.status === 'success' ? onOpenFile : undefined
+
+  return (
+    <li className="conversation-turn">
+      <div className="conversation-request">
+        <span className="conversation-speaker">You</span>
+        <p>{message.prompt}</p>
+      </div>
+      <div className="conversation-response">
+        <span className="conversation-engine-mark" aria-hidden="true"><CodeXml size={17} /></span>
+        <div className="conversation-response-content">
+          <span className="conversation-speaker">Code Engine</span>
+          <p className="conversation-status" data-status={message.status}>
+            <StatusIcon size={15} className={message.status === 'running' ? 'animate-spin' : undefined} aria-hidden="true" />
+            {statusLabels[message.status]}
+          </p>
+          {message.error && <p className="conversation-response-error">{message.error}</p>}
+          {plan ? (
+            <dl className="conversation-plan" aria-label="Execution plan">
+              <dt>Target file</dt>
+              <dd><PromptFile filename={plan.target_filename} onOpenFile={openVerifiedFile} /></dd>
+              <dt>Dependencies</dt>
+              <dd>{plan.dependencies.length ? plan.dependencies.map((dependency, index) => (
+                <code key={`${dependency}-${index}`}>{dependency}</code>
+              )) : <span>None</span>}</dd>
+            </dl>
+          ) : message.filename && (
+            <p className="conversation-target"><PromptFile filename={message.filename} onOpenFile={openVerifiedFile} /></p>
+          )}
+        </div>
+      </div>
+    </li>
+  )
+}
+
+export function PromptPanel({
+  prompt, onPromptChange, onRun, canRun, isExecuting, plan, messages, disabledReason, onOpenFile,
+}: PromptPanelProps) {
+  const history = useRef<HTMLDivElement>(null)
+  const latestMessage = messages.at(-1)
+
+  useEffect(() => {
+    const panel = history.current
+    if (panel) panel.scrollTop = panel.scrollHeight
+  }, [latestMessage, plan])
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (canRun) onRun()
@@ -25,43 +97,42 @@ export function PromptPanel({ prompt, onPromptChange, onRun, canRun, isExecuting
   }
 
   return (
-    <section className="pane prompt-pane" aria-labelledby="prompt-title">
-      <div className="pane-header">
-        <Braces size={17} className="pane-icon" aria-hidden="true" />
-        <h2 id="prompt-title">Task prompt</h2>
+    <section className="conversation-panel" aria-label="Task conversation">
+      <div className="conversation-history" ref={history}>
+        {messages.length ? (
+          <ol className="conversation-thread" aria-label="Prompt history" aria-live="polite">
+            {messages.map((message, index) => (
+              <PromptTurn
+                key={message.id} message={message} onOpenFile={onOpenFile}
+                plan={index === messages.length - 1 ? plan : null}
+              />
+            ))}
+          </ol>
+        ) : (
+          <div className="conversation-empty">
+            <span className="conversation-engine-mark" aria-hidden="true"><CodeXml size={23} /></span>
+            <h2>What would you like to build?</h2>
+            <p>Describe a Python task. Code Engine will write and verify it in your workspace.</p>
+          </div>
+        )}
       </div>
-      <form className="prompt-form" onSubmit={submit}>
-        <label htmlFor="task-prompt" className="field-label">Instructions</label>
+      <form className="conversation-composer" onSubmit={submit}>
+        <label htmlFor="task-prompt" className="sr-only">Instructions</label>
         <textarea
           id="task-prompt" value={prompt} onChange={(event) => onPromptChange(event.target.value)}
-          onKeyDown={handleShortcut} disabled={isExecuting}
-          placeholder="Describe the Python script to build and what it should print when it runs."
+          onKeyDown={handleShortcut} disabled={isExecuting} aria-describedby="prompt-composer-hint"
+          placeholder="Describe what you want to build…"
         />
-        <button type="submit" className="run-button" disabled={!canRun}>
-          {isExecuting ? <LoaderCircle size={17} className="animate-spin" aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
-          <span>{isExecuting ? 'Engine running…' : 'Run Autonomous Engine'}</span>
-          {!isExecuting && <ArrowUpRight size={15} className="ml-auto opacity-60" aria-hidden="true" />}
-        </button>
-        <span className="prompt-hint"><Command size={13} aria-hidden="true" /> or Ctrl + Enter</span>
-      </form>
-      <div className="plan-section">
-        <div className="flex items-center gap-2">
-          <Package size={15} className="pane-icon" aria-hidden="true" />
-          <h3>Execution plan</h3>
+        <div className="conversation-composer-footer">
+          <p id="prompt-composer-hint" className="conversation-hint">
+            {disabledReason && !canRun && !isExecuting ? disabledReason : <><kbd>⌘</kbd> or <kbd>Ctrl</kbd> + <kbd>Enter</kbd></>}
+          </p>
+          <button type="submit" className="conversation-run" disabled={!canRun} aria-label={isExecuting ? 'Running' : 'Run Autonomous Engine'}>
+            {isExecuting ? <LoaderCircle size={17} className="animate-spin" aria-hidden="true" /> : <ArrowUp size={17} aria-hidden="true" />}
+            {isExecuting ? 'Running…' : 'Run'}
+          </button>
         </div>
-        {plan ? (
-          <dl className="plan-details">
-            <dt className="field-label">Target file</dt>
-            <dd className="plan-file"><FileCode2 size={15} aria-hidden="true" /><span>{plan.target_filename}</span></dd>
-            <dt className="field-label">Dependencies</dt>
-            <dd className="dependency-tags">
-              {plan.dependencies.length ? plan.dependencies.map((dependency, index) => (
-                <span key={`${dependency}-${index}`}>{dependency}</span>
-              )) : <span>None</span>}
-            </dd>
-          </dl>
-        ) : <p className="muted-copy">The target file and dependencies will appear when the engine creates a plan.</p>}
-      </div>
+      </form>
     </section>
   )
 }
